@@ -1,0 +1,355 @@
+rm(list=ls())
+options(object.size=Inf)
+options(stringsAsFactors = FALSE)
+
+#------------------------------------------------------------------------------
+# install
+#------------------------------------------------------------------------------
+
+library(WGCNA)
+enableWGCNAThreads()
+library(dplyr)
+library(edgeR)
+library(limma)
+library(stringr)
+library(ggcorrplot)
+library(devtools)
+# devtools::install_github("kassambara/ggcorrplot")
+library(ggcorrplot)
+library(tidyr)
+
+#------------------------------------------------------------------------------
+# Set Working Directory
+#------------------------------------------------------------------------------
+
+setwd("/data") 
+#------------------------------------------------------------------------------
+# Load Prior Session (If Needed)
+#------------------------------------------------------------------------------
+
+
+#------------------------------------------------------------------------------
+# Import Data
+#------------------------------------------------------------------------------
+
+sample.data <- read.table("starting_expression.txt",header=TRUE,row.names=1)
+dim(sample.data)
+
+sample.info <- read.table("starting_info.txt",header=TRUE,row.names=1,sep="\t")
+dim(sample.info)
+
+sample.data <- sample.data[,dimnames(sample.info)[[1]]]
+
+#------------------------------------------------------------------------------
+# Ensure No Non Detected Features Present
+#------------------------------------------------------------------------------
+
+dim(sample.data)
+noise.cut.off <- 3
+dim(sample.data)
+temp1 <- apply(sample.data,1,max)>noise.cut.off
+Final.working.data <- sample.data[temp1,]
+dim(Final.working.data)
+
+#------------------------------------------------------------------------------
+# Prepare to run WGCNA
+#------------------------------------------------------------------------------
+
+datExpr= t(Final.working.data)
+dim(datExpr)
+datExpr = as.data.frame(datExpr)
+
+temp <- sample.info[,1]
+traitData <- data.frame(GROUP = factor(temp))
+
+#------------------------------------------------------------------------------
+# Evaluate and Pick Threshold
+# https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/index.html
+#------------------------------------------------------------------------------
+
+powers = c(c(1:10), seq(from = 12, to=30, by=2))
+
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5, corFnc = "bicor",corOptions = list(use = 'p', maxPOutliers = 0.1), networkType="signed hybrid")
+
+par(mfrow = c(1,2));
+cex1 = 0.9;
+
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+
+power.selection <- 10 # <====== EDIT VALUE HERE
+
+#------------------------------------------------------------------------------
+# Generate Modules
+#------------------------------------------------------------------------------
+
+net = blockwiseModules(
+        datExpr,
+        power = power.selection,
+        corType = "bicor",
+        corOptions = list(use = 'p', maxPOutliers = 0.1),
+        networkType = "signed hybrid",
+        TOMType = "signed",
+        maxBlockSize = 22000,
+        minModuleSize = 20,
+        deepSplit = 2,
+        pamStage = TRUE,
+        reassignThreshold = 0,
+        mergeCutHeight = 0.6,
+        numericLabels = TRUE,
+        pamRespectsDendro = FALSE,
+        verbose = 3,
+        minCoreKME = 0.5,
+        minKMEtoStay = 0.3)
+
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+MEs = net$MEs
+geneTree = net$dendrograms[[1]]
+mergedColors = labels2colors(net$colors)
+
+#------------------------------------------------------------------------------
+# Plot Modules
+#------------------------------------------------------------------------------
+
+
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+
+dissTOM = 1-TOMsimilarityFromExpr(datExpr, power = power.selection)
+
+MEs = moduleEigengenes(datExpr, moduleColors)$eigengenes
+MET = orderMEs(MEs)
+plotEigengeneNetworks(MET, "", marDendro = c(0,4,1,2), marHeatmap = c(3,4,1,2), cex.lab = 0.8, xLabelsAngle= 90)
+
+par(cex = 1.0)
+plotEigengeneNetworks(MET, "Eigengene dendrogram", marDendro = c(0,4,2,0),
+plotHeatmaps = FALSE)
+
+par(cex = 1.0)
+plotEigengeneNetworks(MET, "Eigengene adjacency heatmap", marHeatmap = c(3,4,2,2),
+plotDendrograms = FALSE, xLabelsAngle = 90)
+
+#------------------------------------------------------------------------------
+# Correlate modules with trait data
+#------------------------------------------------------------------------------
+
+nGenes = ncol(datExpr);
+nSamples = nrow(datExpr);
+MEs0 = moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, traitData, use = "p");
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+textMatrix =  paste(signif(moduleTraitCor, 2), "\n(",
+                    signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(moduleTraitCor) == c(length(names(MEs)), length(colnames(traitData)))
+
+write.table(MEs,"MEs.txt",sep="\t")
+write.table(moduleTraitCor,"moduleTraitCor.txt",sep="\t")
+write.table(moduleTraitPvalue,"moduleTraitPvalue.txt",sep="\t")
+
+#------------------------------------------------------------------------------
+# Plot correlation
+#------------------------------------------------------------------------------
+
+ggcorrplot(moduleTraitCor,method = "circle")
+
+par(mar=c(10,10,5,5))
+
+labeledHeatmap(Matrix = moduleTraitCor,
+                xLabels = names(traitData),
+                yLabels = names(MEs),
+                ySymbols = names(MEs),
+                colorLabels = FALSE,
+                colors = blueWhiteRed(50),
+                textMatrix = textMatrix,
+                setStdMargins = FALSE,
+                cex.text = 1,
+                zlim = c(-1,1),
+                main = paste("Module-trait relationships"))
+
+#------------------------------------------------------------------------------
+# Calculate stats for Modules of interest
+#------------------------------------------------------------------------------
+
+modNames = substring(names(MEs), 3)
+modNames
+
+geneModuleMembership <- as.data.frame(cor(datExpr, MEs, use = "p"))
+names(geneModuleMembership) <-  paste("MM", modNames, sep="")
+
+MMPvalue <- as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(MMPvalue) <- paste("p.MM", modNames, sep="")
+
+GROUP = as.data.frame(traitData$GROUP)
+names(GROUP) = "GROUP"
+
+geneTraitSignificance.GROUP <- as.data.frame(cor(datExpr, GROUP, use = "p"))
+names(geneTraitSignificance.GROUP) = paste("GS.", names(GROUP), sep="")
+
+GSPvalue.GROUP <- as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance.GROUP), nSamples))
+names(GSPvalue.GROUP) = paste("p.GS.", names(GROUP), sep="")
+
+#------------------------------------------------------------------------------
+# Output stats for Modules of interest
+#------------------------------------------------------------------------------
+
+# MEblue GROUP
+
+col.2.use <- "blue"
+mod.genes.2.use <- names(datExpr)[moduleColors==col.2.use]
+to.out <- data.frame(RANK=c(1:length(mod.genes.2.use)),BLUE_GROUP=geneTraitSignificance.GROUP[mod.genes.2.use,],BLUE_GROUP_Pvalue=GSPvalue.GROUP[mod.genes.2.use,])
+dimnames(to.out)[[1]] <- mod.genes.2.use
+final.out <- to.out[order(-abs(to.out$BLUE_GROUP)),]
+final.out[,1] <- c(1:length(mod.genes.2.use))
+write.csv(final.out, "WGCNA_MEblue_GROUP_Results.csv")
+final.out.blue <- final.out
+
+# MEturquoise GROUP
+
+col.2.use <- "turquoise"
+mod.genes.2.use <- names(datExpr)[moduleColors==col.2.use]
+to.out <- data.frame(RANK=c(1:length(mod.genes.2.use)),TURQUOISE_GROUP=geneTraitSignificance.GROUP[mod.genes.2.use,],TURQUOISE_GROUP_Pvalue=GSPvalue.GROUP[mod.genes.2.use,])
+dimnames(to.out)[[1]] <- mod.genes.2.use
+final.out <- to.out[order(-abs(to.out$TURQUOISE_GROUP)),]
+final.out[,1] <- c(1:length(mod.genes.2.use))
+write.csv(final.out, "WGCNA_MEturquoise_GROUP_Results.csv")
+final.out.turquoise <- final.out
+
+#------------------------------------------------------------------------------
+# Generate network files for Modules of interest
+#------------------------------------------------------------------------------
+
+TOM = TOMsimilarityFromExpr(datExpr, power = power.selection)
+
+# blue
+modules = c("blue")
+probes = names(datExpr)
+inModule = is.finite(match(moduleColors, modules));
+modProbes = probes[inModule];
+modGenes = modProbes
+modTOM = TOM[inModule, inModule]
+dimnames(modTOM) = list(modProbes, modProbes)
+cyt <- exportNetworkToCytoscape(modTOM,
+edgeFile = paste("CytoscapeInput-edges-", paste(modules, collapse="-"), ".txt", sep=""),
+nodeFile = paste("CytoscapeInput-nodes-", paste(modules, collapse="-"), ".txt", sep=""),
+weighted = TRUE,
+threshold = 0.02,
+nodeNames = modProbes,
+altNodeNames = modGenes,
+nodeAttr = moduleColors[inModule])
+saveRDS(cyt,"Cytoscape_Network_blue.rds")
+
+# turquoise
+modules = c("turquoise")
+probes = names(datExpr)
+inModule = is.finite(match(moduleColors, modules));
+modProbes = probes[inModule];
+modGenes = modProbes
+modTOM = TOM[inModule, inModule]
+dimnames(modTOM) = list(modProbes, modProbes)
+cyt <- exportNetworkToCytoscape(modTOM,
+edgeFile = paste("CytoscapeInput-edges-", paste(modules, collapse="-"), ".txt", sep=""),
+nodeFile = paste("CytoscapeInput-nodes-", paste(modules, collapse="-"), ".txt", sep=""),
+weighted = TRUE,
+threshold = 0.02,
+nodeNames = modProbes,
+altNodeNames = modGenes,
+nodeAttr = moduleColors[inModule])
+saveRDS(cyt,"Cytoscape_Network_turquoise.rds")
+
+#######################################################
+# 1. 输出模块聚类树（模块之间的距离）
+#######################################################
+png("module_dendrogram.png", width = 2000, height = 1500)
+plot(hclust(dist(MEs)), main = "Module eigengene clustering")
+dev.off()
+
+
+#######################################################
+# 2. 输出模块特征基因之间的邻接热图
+#######################################################
+MEcor <- cor(MEs)
+
+png("module_eigengene_adjacency_heatmap.png", width = 2000, height = 2000)
+labeledHeatmap(
+  Matrix = MEcor,
+  xLabels = names(MEs),
+  yLabels = names(MEs),
+  main = "Eigengene adjacency heatmap",
+  colorLabels = FALSE,
+  colors = blueWhiteRed(50)
+)
+dev.off()
+
+
+#######################################################
+# 3. 输出所有基因对应模块（最重要的表）
+#######################################################
+allGenes <- data.frame(
+  Gene = colnames(datExpr),
+  Module = moduleColors
+)
+
+write.csv(allGenes,
+          "01_All_Genes_and_Modules.csv",
+          row.names = FALSE)
+
+# 按模块排序
+module_gene_table <- allGenes %>% arrange(Module)
+write.csv(module_gene_table,
+          "02_Module_Gene_List_ByModule.csv",
+          row.names = FALSE)
+
+
+#######################################################
+# 4. 每个模块单独导出一个表（核心需求）
+#######################################################
+modules <- unique(moduleColors)
+
+for (m in modules) {
+  genes_m <- allGenes[allGenes$Module == m, ]
+  write.csv(
+    genes_m,
+    paste0("Module_", m, "_genes.csv"),
+    row.names = FALSE
+  )
+}
+
+
+#######################################################
+# 5. 模块尺寸表（可用于筛选大模块）
+#######################################################
+module_sizes <- as.data.frame(table(moduleColors))
+colnames(module_sizes) <- c("Module", "GeneCount")
+
+write.csv(module_sizes,
+          "03_Module_Size_Statistics.csv",
+          row.names = FALSE)
+
+
+#######################################################
+# 6. 模块 ME PCA（可选，不依赖 phenotype）
+#######################################################
+png("module_ME_PCA.png", width = 2000, height = 1800)
+par(mfrow = c(2,2))  # 最多显示4个模块，更多可自行修改布局
+
+for (m in names(MEs)[1:min(4, ncol(MEs))]) {
+  pca <- prcomp(MEs[, m, drop = FALSE])
+  plot(
+    pca$x[,1], pca$x[,1],
+    main = paste("PCA of", m),
+    xlab = "PC1", ylab = "PC1", pch = 19
+  )
+}
+dev.off()
